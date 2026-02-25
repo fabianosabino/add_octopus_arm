@@ -1,0 +1,19 @@
+use_default_settings: true
+server:
+  secret_key: "simpleclaw_searxng_key_change_in_production"
+  limiter: false
+  image_proxy: true
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "pt-BR"
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp

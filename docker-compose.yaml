@@ -1,0 +1,86 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL ────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: simpleclaw_db
+    environment:
+      POSTGRES_USER: simpleclaw
+      POSTGRES_PASSWORD: simpleclaw
+      POSTGRES_DB: simpleclaw
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U simpleclaw"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── SearXNG (Web Search) ──────────────────
+  searxng:
+    image: searxng/searxng:latest
+    container_name: simpleclaw_search
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./docker/searxng-settings.yaml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888
+    depends_on:
+      - postgres
+
+  # ── Apache Superset (Dashboards) ─────────
+  superset:
+    image: apache/superset:latest
+    container_name: simpleclaw_superset
+    ports:
+      - "8088:8088"
+    environment:
+      - SUPERSET_SECRET_KEY=simpleclaw_superset_secret_change_in_production
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=admin
+      - ADMIN_EMAIL=admin@simpleclaw.local
+    volumes:
+      - superset_data:/app/superset_home
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      bash -c "
+        superset db upgrade &&
+        superset fab create-admin --username admin --firstname Admin --lastname User --email admin@simpleclaw.local --password admin || true &&
+        superset init &&
+        superset run -h 0.0.0.0 -p 8088 --with-threads
+      "
+    restart: unless-stopped
+
+  # ── SimpleClaw App ────────────────────────
+  simpleclaw:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: simpleclaw_app
+    env_file:
+      - .env
+    environment:
+      SIMPLECLAW_DATABASE_URL: postgresql+psycopg://simpleclaw:simpleclaw@postgres:5432/simpleclaw
+      SIMPLECLAW_SEARXNG_URL: http://searxng:8080
+      SIMPLECLAW_SUPERSET_URL: http://superset:8088
+    volumes:
+      - ./context:/app/context
+      - ./backups:/app/backups
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      searxng:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  superset_data:

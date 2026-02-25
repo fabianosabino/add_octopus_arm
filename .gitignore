@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Logs
+logs/*.log
+
+# Backups
+backups/daily/*.tar.gz
+backups/pre_task/*.tar.gz
+
+# Context (runtime data)
+context/processing/*
+context/completed/*
+context/interrupt/*
+!context/*/.gitkeep
+
+# Temp
+/tmp/
+*.ogg
+*.wav
+
+# OS
+.DS_Store
+Thumbs.db

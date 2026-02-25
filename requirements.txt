@@ -1,0 +1,59 @@
+# SimpleClaw v2.0 - Pinned Dependencies
+# ======================================
+
+# Core Framework
+agno[os,ollama,openai,anthropic,postgres,async-postgres,pgvector,sqlite,mcp,ddg]==2.5.3
+
+# Telegram Interface
+python-telegram-bot[job-queue]==21.10
+
+# Database
+sqlalchemy==2.0.36
+psycopg[binary]==3.2.4
+pgvector==0.3.6
+alembic==1.14.1
+
+# Security (Vault)
+cryptography==44.0.0
+
+# Scheduling
+APScheduler==3.10.4
+
+# Context Management
+tiktoken==0.9.0
+
+# File Generation
+reportlab==4.2.5
+python-docx==1.1.2
+openpyxl==3.1.5
+matplotlib==3.10.0
+Pillow==11.1.0
+
+# Audio Transcription
+openai-whisper==20240930
+# Fallback: SpeechRecognition==3.12.0
+
+# Web Search (SearXNG client)
+httpx==0.28.1
+
+# Docker Management
+docker==7.1.0
+
+# Process Isolation
+psutil==6.1.1
+
+# Git
+gitpython==3.1.44
+
+# Utilities
+pydantic==2.10.5
+pydantic-settings==2.7.1
+pyyaml==6.0.2
+python-dotenv==1.0.1
+structlog==24.4.0
+tenacity==9.0.0
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.0
+pytest-cov==6.0.0
