@@ -26,6 +26,7 @@ from telegram.ext import (
 from src.config.settings import get_settings
 from src.agents.router import RouterAgent, Intent
 from src.agents.specialist_team import SpecialistManager
+from src.agents.task_executor import TaskExecutor
 from src.storage.database import get_session
 from src.storage.models import User, Task, TaskStatus
 from src.tools.cost_tracker import get_user_cost_summary
@@ -45,19 +46,27 @@ class TelegramBot:
         self._settings = get_settings()
         self._router = RouterAgent()
         self._specialist = SpecialistManager()
+        self._task_executor: Optional[TaskExecutor] = None
         self._app: Optional[Application] = None
-        self._active_tasks: dict[int, bool] = {}  # telegram_id -> is_busy
+        self._active_tasks: dict[int, bool] = {}
         self._watchdog = None
 
     def set_watchdog(self, watchdog) -> None:
         """Set watchdog reference for health checks."""
         self._watchdog = watchdog
-        # Wire admin notifications
-        watchdog.set_notify_callback(self._notify_admin)
+        if watchdog:
+            watchdog.set_notify_callback(self._notify_admin)
 
     async def start(self) -> None:
         """Initialize and start the Telegram bot."""
         await self._router.initialize()
+
+        # Create task executor with resilient loop
+        self._task_executor = TaskExecutor(self._specialist, self._router)
+        self._task_executor.set_notify_callback(self._send_progress)
+
+        # Wire specialist progress notifications
+        self._specialist.set_notify_callback(self._send_progress)
 
         self._app = (
             Application.builder()
@@ -134,6 +143,26 @@ class TelegramBot:
         """Generate a deterministic session ID per user."""
         return f"tg_{telegram_id}"
 
+    async def _safe_reply(self, message, text: str) -> None:
+        """Send message with Markdown, fallback to plain text on parse error."""
+        try:
+            await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            try:
+                await message.reply_text(text, parse_mode=None)
+            except Exception:
+                await message.reply_text(
+                    "Resposta gerada mas houve erro na formatação. Tente novamente."
+                )
+
+    async def _send_progress(self, chat_id: int, text: str) -> None:
+        """Send progress update to user (used by specialist for step-by-step)."""
+        if self._app:
+            try:
+                await self._app.bot.send_message(chat_id=chat_id, text=text)
+            except Exception:
+                pass
+
     # ─── COMMANDS ────────────────────────────────────────────
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -152,7 +181,6 @@ class TelegramBot:
             parse_mode=ParseMode.MARKDOWN,
         )
 
-        # Preload specialist model in background
         if self._settings.preload_specialist_on_interaction:
             asyncio.create_task(self._specialist.preload_model())
 
@@ -197,11 +225,10 @@ class TelegramBot:
             for t in tasks
         ]
         response = await self._router.format_status_response(tasks_data, str(user.id))
-        await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+        await self._safe_reply(update.message, response)
 
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = await self._ensure_user(update)
-        # Set interrupt flag for active tasks
         async with await get_session() as session:
             from sqlalchemy import select, update as sql_update
             stmt = (
@@ -227,7 +254,7 @@ class TelegramBot:
             for m in summary["by_model"]:
                 lines.append(f"  • {m['model']}: ${m['cost_usd']:.4f} ({m['tokens']:,} tokens)")
 
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        await self._safe_reply(update.message, "\n".join(lines))
 
     async def _cmd_new_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
@@ -247,16 +274,26 @@ class TelegramBot:
         else:
             report = "⚠️ Watchdog não inicializado."
 
-        await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
+        await self._safe_reply(update.message, report)
 
     async def _notify_admin(self, telegram_id: int, message: str) -> None:
         """Send notification to admin (used by watchdog)."""
         if self._app:
-            await self._app.bot.send_message(
-                chat_id=telegram_id,
-                text=message,
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            try:
+                await self._app.bot.send_message(
+                    chat_id=telegram_id,
+                    text=message,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception:
+                try:
+                    await self._app.bot.send_message(
+                        chat_id=telegram_id,
+                        text=message,
+                        parse_mode=None,
+                    )
+                except Exception:
+                    pass
 
     async def _send_file(self, chat_id: int, filepath: Path, caption: str = "") -> None:
         """Send a generated file to the user via Telegram."""
@@ -275,65 +312,66 @@ class TelegramBot:
     # ─── MESSAGE HANDLERS ────────────────────────────────────
 
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming text messages."""
+        """Handle incoming text messages with full error boundary."""
         user = await self._ensure_user(update)
         message = update.message.text
         session_id = self._get_session_id(user.telegram_id)
         user_id = str(user.id)
+        chat_id = update.effective_chat.id
 
-        # Show typing indicator
         await update.message.chat.send_action(ChatAction.TYPING)
 
-        # Classify intent
-        intent = await self._router.classify_intent(message)
-        logger.info("message.classified", intent=intent.value, user_id=user_id)
+        try:
+            intent = await self._router.classify_intent(message)
+            logger.info("message.classified", intent=intent.value, user_id=user_id)
 
-        if intent == Intent.CHAT:
-            response = await self._router.chat(message, user_id, session_id)
-            await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+            if intent == Intent.CHAT:
+                response = await self._router.chat(message, user_id, session_id)
+                await self._safe_reply(update.message, response)
 
-        elif intent == Intent.TASK:
-            await update.message.reply_text("🔄 Gerando especificação da tarefa...")
-            spec = await self._router.generate_task_spec(message, user_id)
-
-            await update.message.reply_text("⚙️ Executando com equipe especialista...")
-            try:
-                result = await self._specialist.execute_task(spec, user_id, session_id)
-                await update.message.reply_text(result, parse_mode=ParseMode.MARKDOWN)
-
-                # Check if any files were generated and send them
-                await self._send_generated_files(update.effective_chat.id, result)
-            except Exception as e:
-                await update.message.reply_text(
-                    f"❌ Erro na execução: {str(e)[:200]}\nUse /status para mais detalhes."
+            elif intent == Intent.TASK:
+                result = await self._task_executor.execute(
+                    request=message,
+                    user_id=user_id,
+                    session_id=session_id,
+                    chat_id=chat_id,
                 )
+                await self._safe_reply(update.message, result)
+                await self._send_generated_files(chat_id, result)
 
-        elif intent == Intent.STATUS:
-            await self._cmd_status(update, context)
+            elif intent == Intent.STATUS:
+                await self._cmd_status(update, context)
 
-        elif intent == Intent.SCHEDULE:
-            response = await self._router.chat(
-                f"O usuário quer agendar algo: {message}", user_id, session_id
+            elif intent == Intent.SCHEDULE:
+                response = await self._router.chat(
+                    f"O usuário quer agendar algo: {message}", user_id, session_id
+                )
+                await self._safe_reply(update.message, response)
+
+            elif intent == Intent.SEARCH:
+                await update.message.reply_text("🔍 Pesquisando...")
+                response = await self._router.chat(
+                    f"Pesquise e responda: {message}", user_id, session_id
+                )
+                await self._safe_reply(update.message, response)
+
+            else:
+                response = await self._router.chat(message, user_id, session_id)
+                await self._safe_reply(update.message, response)
+
+        except Exception as e:
+            logger.error("handle_text.error", error=str(e), user_id=user_id)
+            await self._safe_reply(
+                update.message,
+                "Encontrei um problema ao processar sua mensagem. "
+                "Estou me recuperando. Tente novamente em alguns segundos."
             )
-            await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
-
-        elif intent == Intent.SEARCH:
-            await update.message.reply_text("🔍 Pesquisando...")
-            response = await self._router.chat(
-                f"Pesquise e responda: {message}", user_id, session_id
-            )
-            await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
-
-        else:
-            response = await self._router.chat(message, user_id, session_id)
-            await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
 
     async def _handle_audio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle voice messages and audio files."""
         user = await self._ensure_user(update)
         await update.message.reply_text("🎤 Recebendo áudio... Transcrição em breve.")
 
-        # Download audio file
         if update.message.voice:
             file = await update.message.voice.get_file()
         else:
@@ -342,8 +380,6 @@ class TelegramBot:
         audio_path = Path(f"/tmp/simpleclaw_audio_{user.telegram_id}.ogg")
         await file.download_to_drive(str(audio_path))
 
-        # TODO: Integrate whisper transcription
-        # For now, acknowledge receipt
         await update.message.reply_text(
             "📝 Áudio recebido. A transcrição será implementada com Whisper. "
             "Por enquanto, envie sua mensagem em texto."
@@ -354,14 +390,12 @@ class TelegramBot:
         user = await self._ensure_user(update)
         await update.message.reply_text("🖼️ Imagem recebida. Analisando...")
 
-        # Get largest photo
         photo = update.message.photo[-1]
         file = await photo.get_file()
 
         image_path = Path(f"/tmp/simpleclaw_img_{user.telegram_id}.jpg")
         await file.download_to_drive(str(image_path))
 
-        # Caption as context
         caption = update.message.caption or "Analise esta imagem."
         session_id = self._get_session_id(user.telegram_id)
 
@@ -370,16 +404,15 @@ class TelegramBot:
             str(user.id),
             session_id,
         )
-        await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+        await self._safe_reply(update.message, response)
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle document uploads."""
         user = await self._ensure_user(update)
         doc = update.message.document
-        await update.message.reply_text(
-            f"📄 Documento recebido: *{doc.file_name}* ({doc.file_size // 1024}KB)\n"
-            "Processando...",
-            parse_mode=ParseMode.MARKDOWN,
+        await self._safe_reply(
+            update.message,
+            f"📄 Documento recebido: {doc.file_name} ({doc.file_size // 1024}KB). Processando..."
         )
 
         file = await doc.get_file()
@@ -394,12 +427,11 @@ class TelegramBot:
             str(user.id),
             session_id,
         )
-        await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+        await self._safe_reply(update.message, response)
 
     async def _send_generated_files(self, chat_id: int, result_text: str) -> None:
         """Detect file paths in agent output and send them via Telegram."""
         import re
-        # Match file paths from tool outputs like "✅ PDF gerado: /tmp/simpleclaw_files/xxx.pdf"
         file_patterns = re.findall(r'/tmp/simpleclaw_files/[^\s\n]+', result_text)
         for filepath_str in file_patterns:
             filepath = Path(filepath_str)

@@ -14,13 +14,10 @@ from typing import Optional
 
 import structlog
 from agno.agent import Agent
-from agno.db.postgres import PostgresDb
-from agno.memory.v2.memory import Memory
-from agno.storage.agent.postgres import PostgresAgentStorage
+from agno.storage.postgres import PostgresStorage
 
 from src.config.settings import get_settings
 from src.config.persona_loader import load_persona, build_agent_instructions
-from src.tools.context_compressor import ContextCompressor
 
 logger = structlog.get_logger()
 
@@ -46,16 +43,15 @@ class RouterAgent:
     - Classify user intent
     - Handle direct chat
     - Generate task specifications for specialist delegation
-    - Manage conversation memory per user
+    - Manage conversation history per user
     - Coordinate model preloading for specialist tasks
     """
 
     def __init__(self):
         self._settings = get_settings()
         self._persona = load_persona("router")
-        self._compressor = ContextCompressor()
         self._agent: Optional[Agent] = None
-        self._db: Optional[PostgresDb] = None
+        self._storage: Optional[PostgresStorage] = None
         self._initialized = False
 
     async def initialize(self) -> None:
@@ -63,81 +59,62 @@ class RouterAgent:
         if self._initialized:
             return
 
-        # Database for Agno storage
-        self._db = PostgresDb(
+        self._storage = PostgresStorage(
+            table_name="router_sessions",
             db_url=self._settings.database_url,
-            schema=self._settings.system_schema,
         )
 
-        # Get the router model
         model_config = self._settings.get_router_model_config()
         model = model_config.get_agno_model()
 
-        # Get router tools
         from src.tools.agno_wrappers import get_router_tools
 
-        # Build the agent
         self._agent = Agent(
             name=self._persona.get("name", "SimpleClaw"),
             model=model,
             instructions=build_agent_instructions(self._persona),
             tools=get_router_tools(),
-            db=self._db,
-            # Agno native memory
-            enable_user_memories=True,
-            add_history_to_context=True,
+            storage=self._storage,
+            add_history_to_messages=True,
             num_history_runs=5,
             markdown=True,
-            show_tool_calls=False,
         )
 
         self._initialized = True
         logger.info("router.initialized", model=self._settings.router_model_id)
 
     async def classify_intent(self, message: str) -> Intent:
-        """
-        Classify user message intent using the router model.
-        Fast classification without full agent invocation.
-        """
-        # Quick pattern matching first (no model call needed)
+        """Classify user message intent. Fast pattern matching first, model fallback second."""
         lower = message.lower().strip()
 
-        # Commands
         if lower.startswith("/"):
             return Intent.COMMAND
 
-        # Status queries
         status_keywords = ["status", "andamento", "progresso", "fila", "queue"]
         if any(kw in lower for kw in status_keywords):
             return Intent.STATUS
 
-        # Schedule requests
         schedule_keywords = ["agendar", "lembrar", "todo dia", "toda semana", "às", "cron", "alarme"]
         if any(kw in lower for kw in schedule_keywords):
             return Intent.SCHEDULE
 
-        # File requests
         file_keywords = ["gerar pdf", "criar planilha", "fazer documento", "excel", "docx", "relatório"]
         if any(kw in lower for kw in file_keywords):
             return Intent.FILE_REQUEST
 
-        # DB queries
         db_keywords = ["banco de dados", "database", "sql", "query", "tabela", "schema"]
         if any(kw in lower for kw in db_keywords):
             return Intent.DB_QUERY
 
-        # Search
         search_keywords = ["pesquisar", "buscar", "procurar", "search", "encontrar na web"]
         if any(kw in lower for kw in search_keywords):
             return Intent.SEARCH
 
-        # Task indicators (more complex requests)
         task_keywords = [
             "criar", "desenvolver", "implementar", "construir", "fazer",
             "analisar", "processar", "automatizar", "configurar", "montar",
         ]
         if len(lower.split()) > 15 or any(kw in lower for kw in task_keywords):
-            # Could be a task - use model for disambiguation
             return await self._model_classify(message)
 
         return Intent.CHAT
@@ -162,17 +139,12 @@ class RouterAgent:
                 if intent.value in content:
                     return intent
 
-            return Intent.TASK  # Default to task for complex messages
+            return Intent.TASK
         except Exception as e:
             logger.error("router.classify_failed", error=str(e))
             return Intent.CHAT
 
-    async def chat(
-        self,
-        message: str,
-        user_id: str,
-        session_id: str,
-    ) -> str:
+    async def chat(self, message: str, user_id: str, session_id: str) -> str:
         """Handle direct chat (no specialist needed)."""
         if not self._agent:
             await self.initialize()
@@ -209,7 +181,6 @@ class RouterAgent:
             response = self._agent.run(prompt, user_id=user_id)
             content = response.content if hasattr(response, "content") else str(response)
 
-            # Parse structured response into dict
             return {
                 "raw_spec": content,
                 "original_request": message,
