@@ -1,0 +1,125 @@
+# SimpleClaw System Manifest
+# ===========================
+# Fonte ÚNICA de verdade sobre identidade e capacidades.
+# Consultado antes de qualquer resposta sobre "quem sou eu".
+# NUNCA editado por agentes. Apenas por humanos.
+
+identity:
+  name: "SimpleClaw"
+  version: "2.1.0"
+  codename: "Resilient Loop"
+  description: "Assistente pessoal multi-agente via Telegram"
+  language: "pt-BR"
+  author: "Sabino"
+
+models:
+  router:
+    description: "Modelo leve para comunicação e orquestração"
+    note: "Configurado via .env (SIMPLECLAW_ROUTER_*)"
+  specialist:
+    description: "Modelo robusto para tarefas complexas"
+    note: "Configurado via .env (SIMPLECLAW_SPECIALIST_*)"
+
+capabilities:
+  available:
+    - id: "chat"
+      description: "Conversa direta com o usuário"
+      agent: "router"
+    - id: "search_web"
+      description: "Pesquisa na web via SearXNG"
+      agent: "router"
+      tool: "search_web"
+    - id: "run_sql"
+      description: "Executar queries SQL em bancos PostgreSQL"
+      agent: "db_architect"
+      tool: "run_sql"
+    - id: "create_csv"
+      description: "Gerar arquivos CSV"
+      agent: "code_wizard"
+      tool: "create_csv"
+    - id: "create_xlsx"
+      description: "Gerar planilhas Excel"
+      agent: "code_wizard"
+      tool: "create_xlsx"
+    - id: "create_pdf"
+      description: "Gerar documentos PDF"
+      agent: "code_wizard"
+      tool: "create_pdf"
+    - id: "create_docx"
+      description: "Gerar documentos Word"
+      agent: "code_wizard"
+      tool: "create_docx"
+    - id: "create_chart"
+      description: "Gerar gráficos (bar, line, pie, scatter)"
+      agent: "code_wizard"
+      tool: "create_chart"
+    - id: "execute_python"
+      description: "Executar código Python em sandbox"
+      agent: "code_wizard"
+      tool: "execute_python"
+    - id: "git_save"
+      description: "Criar checkpoint git do trabalho"
+      agent: "devops_engineer"
+      tool: "git_save"
+    - id: "git_history"
+      description: "Consultar histórico de checkpoints"
+      agent: "devops_engineer"
+      tool: "git_history"
+    - id: "audio_transcribe"
+      description: "Transcrever áudio para texto via Whisper"
+      agent: "router"
+      tool: "audio_transcribe"
+    - id: "audio_speak"
+      description: "Sintetizar texto em voz via Piper TTS"
+      agent: "router"
+      tool: "audio_speak"
+
+  not_available:
+    - id: "schedule_message"
+      reason: "Agendamento de mensagens ainda não implementado"
+      planned: true
+    - id: "send_email"
+      reason: "Envio de email não está no escopo atual"
+      planned: false
+    - id: "browse_web"
+      reason: "Navegação web interativa não disponível. Use search_web."
+      planned: false
+    - id: "create_database"
+      reason: "Criação de banco é feita via run_sql com CREATE DATABASE"
+      planned: false
+    - id: "deploy"
+      reason: "Deploy automático não implementado"
+      planned: true
+    - id: "notify_specialist"
+      reason: "Não existe. O Router delega internamente."
+      planned: false
+
+agents:
+  - id: "router"
+    name: "SimpleClaw"
+    role: "Router e Orquestrador"
+    always_on: true
+  - id: "db_architect"
+    name: "Alexandre"
+    role: "Arquiteto de Banco de Dados"
+    always_on: false
+  - id: "code_wizard"
+    name: "Marina"
+    role: "Desenvolvedora Full-Stack"
+    always_on: false
+  - id: "devops_engineer"
+    name: "Carlos"
+    role: "Engenheiro DevOps"
+    always_on: false
+  - id: "research_analyst"
+    name: "Sophia"
+    role: "Analista de Pesquisa"
+    always_on: false
+
+limits:
+  max_audio_duration_seconds: 20
+  max_file_size_mb: 10
+  max_sql_rows: 100
+  max_concurrent_tasks: 2
+  task_timeout_minutes: 25
+  debug_log_retention_days: 7

@@ -1,8 +1,8 @@
 """
-SimpleClaw v2.0 - Telegram Interface
+SimpleClaw v2.1 - Telegram Interface
 ======================================
-Multi-tenant Telegram bot with command handling,
-multimedia support, and file delivery.
+Multi-tenant bot com debug window, áudio via Whisper/Piper,
+e integração com Sanity Layer.
 """
 
 from __future__ import annotations
@@ -37,9 +37,7 @@ logger = structlog.get_logger()
 class TelegramBot:
     """
     Multi-tenant Telegram bot interface.
-    
-    Each user gets their own session and memory context.
-    Handles text, images, audio, and file delivery.
+    Debug window, audio transcription, and Sanity Layer integration.
     """
 
     def __init__(self):
@@ -52,20 +50,15 @@ class TelegramBot:
         self._watchdog = None
 
     def set_watchdog(self, watchdog) -> None:
-        """Set watchdog reference for health checks."""
         self._watchdog = watchdog
         if watchdog:
             watchdog.set_notify_callback(self._notify_admin)
 
     async def start(self) -> None:
-        """Initialize and start the Telegram bot."""
         await self._router.initialize()
 
-        # Create task executor with resilient loop
         self._task_executor = TaskExecutor(self._specialist, self._router)
         self._task_executor.set_notify_callback(self._send_progress)
-
-        # Wire specialist progress notifications
         self._specialist.set_notify_callback(self._send_progress)
 
         self._app = (
@@ -73,6 +66,9 @@ class TelegramBot:
             .token(self._settings.telegram_token)
             .build()
         )
+
+        # Pass app reference to task executor for debug window
+        self._task_executor.set_bot_app(self._app)
 
         # Register handlers
         self._app.add_handler(CommandHandler("start", self._cmd_start))
@@ -83,13 +79,12 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("new", self._cmd_new_session))
         self._app.add_handler(CommandHandler("health", self._cmd_health))
 
-        # Message handlers (order matters)
+        # Message handlers
         self._app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, self._handle_audio))
         self._app.add_handler(MessageHandler(filters.PHOTO, self._handle_image))
         self._app.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
         self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
 
-        # Set bot commands
         await self._app.bot.set_my_commands([
             BotCommand("start", "Iniciar o SimpleClaw"),
             BotCommand("help", "Ver comandos disponíveis"),
@@ -106,7 +101,6 @@ class TelegramBot:
         await self._app.updater.start_polling(drop_pending_updates=True)
 
     async def stop(self) -> None:
-        """Stop the Telegram bot gracefully."""
         if self._app:
             await self._app.updater.stop()
             await self._app.stop()
@@ -117,7 +111,6 @@ class TelegramBot:
     # ─── HELPERS ─────────────────────────────────────────────
 
     async def _ensure_user(self, update: Update) -> User:
-        """Get or create user in database."""
         tg_user = update.effective_user
         async with await get_session() as session:
             from sqlalchemy import select
@@ -140,11 +133,9 @@ class TelegramBot:
             return user
 
     def _get_session_id(self, telegram_id: int) -> str:
-        """Generate a deterministic session ID per user."""
         return f"tg_{telegram_id}"
 
     async def _safe_reply(self, message, text: str) -> None:
-        """Send message with Markdown, fallback to plain text on parse error."""
         try:
             await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
         except Exception:
@@ -156,7 +147,6 @@ class TelegramBot:
                 )
 
     async def _send_progress(self, chat_id: int, text: str) -> None:
-        """Send progress update to user (used by specialist for step-by-step)."""
         if self._app:
             try:
                 await self._app.bot.send_message(chat_id=chat_id, text=text)
@@ -175,7 +165,7 @@ class TelegramBot:
             "• 📋 Tarefas técnicas (código, banco de dados, relatórios)\n"
             "• 🔍 Pesquisas na web\n"
             "• 📊 Geração de arquivos (PDF, DOCX, XLSX)\n"
-            "• ⏰ Agendamentos e lembretes\n"
+            "• 🎤 Áudio (envie mensagem de voz)\n"
             "• 💰 Controle de custos de API\n\n"
             "Use /help para ver todos os comandos.",
             parse_mode=ParseMode.MARKDOWN,
@@ -195,7 +185,7 @@ class TelegramBot:
             "/help — Esta mensagem\n\n"
             "💡 *Dicas:*\n"
             "• Envie texto para conversar ou solicitar tarefas\n"
-            "• Envie áudio para transcrição automática\n"
+            "• Envie áudio para transcrição e resposta por voz\n"
             "• Envie imagens para análise\n"
             "• Envie documentos para processamento",
             parse_mode=ParseMode.MARKDOWN,
@@ -262,7 +252,6 @@ class TelegramBot:
         )
 
     async def _cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Show system health status (admin only)."""
         user = await self._ensure_user(update)
         if not user.is_admin:
             await update.message.reply_text("⛔ Comando disponível apenas para administradores.")
@@ -277,42 +266,33 @@ class TelegramBot:
         await self._safe_reply(update.message, report)
 
     async def _notify_admin(self, telegram_id: int, message: str) -> None:
-        """Send notification to admin (used by watchdog)."""
         if self._app:
             try:
                 await self._app.bot.send_message(
-                    chat_id=telegram_id,
-                    text=message,
-                    parse_mode=ParseMode.MARKDOWN,
+                    chat_id=telegram_id, text=message, parse_mode=ParseMode.MARKDOWN,
                 )
             except Exception:
                 try:
                     await self._app.bot.send_message(
-                        chat_id=telegram_id,
-                        text=message,
-                        parse_mode=None,
+                        chat_id=telegram_id, text=message, parse_mode=None,
                     )
                 except Exception:
                     pass
 
     async def _send_file(self, chat_id: int, filepath: Path, caption: str = "") -> None:
-        """Send a generated file to the user via Telegram."""
         if not filepath.exists():
             await self._app.bot.send_message(chat_id=chat_id, text="❌ Arquivo não encontrado.")
             return
 
         with open(filepath, "rb") as f:
             await self._app.bot.send_document(
-                chat_id=chat_id,
-                document=f,
-                filename=filepath.name,
+                chat_id=chat_id, document=f, filename=filepath.name,
                 caption=caption or f"📎 {filepath.name}",
             )
 
     # ─── MESSAGE HANDLERS ────────────────────────────────────
 
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming text messages with full error boundary."""
         user = await self._ensure_user(update)
         message = update.message.text
         session_id = self._get_session_id(user.telegram_id)
@@ -331,10 +311,8 @@ class TelegramBot:
 
             elif intent == Intent.TASK:
                 result = await self._task_executor.execute(
-                    request=message,
-                    user_id=user_id,
-                    session_id=session_id,
-                    chat_id=chat_id,
+                    request=message, user_id=user_id,
+                    session_id=session_id, chat_id=chat_id,
                 )
                 await self._safe_reply(update.message, result)
                 await self._send_generated_files(chat_id, result)
@@ -343,13 +321,22 @@ class TelegramBot:
                 await self._cmd_status(update, context)
 
             elif intent == Intent.SCHEDULE:
+                # Validate against capabilities before routing
+                try:
+                    from src.sanity.sanity_layer import validate_intent_against_capabilities
+                    decision = validate_intent_against_capabilities("schedule", message)
+                    if decision.action == "impossible":
+                        await self._safe_reply(update.message, f"{decision.reason}")
+                        return
+                except ImportError:
+                    pass
+
                 response = await self._router.chat(
                     f"O usuário quer agendar algo: {message}", user_id, session_id
                 )
                 await self._safe_reply(update.message, response)
 
             elif intent == Intent.SEARCH:
-                await update.message.reply_text("🔍 Pesquisando...")
                 response = await self._router.chat(
                     f"Pesquise e responda: {message}", user_id, session_id
                 )
@@ -368,10 +355,14 @@ class TelegramBot:
             )
 
     async def _handle_audio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle voice messages and audio files."""
+        """Handle voice messages: transcribe with Whisper, process, respond with TTS."""
         user = await self._ensure_user(update)
-        await update.message.reply_text("🎤 Recebendo áudio... Transcrição em breve.")
+        session_id = self._get_session_id(user.telegram_id)
+        user_id = str(user.id)
 
+        await update.message.chat.send_action(ChatAction.TYPING)
+
+        # Download audio
         if update.message.voice:
             file = await update.message.voice.get_file()
         else:
@@ -380,13 +371,63 @@ class TelegramBot:
         audio_path = Path(f"/tmp/simpleclaw_audio_{user.telegram_id}.ogg")
         await file.download_to_drive(str(audio_path))
 
-        await update.message.reply_text(
-            "📝 Áudio recebido. A transcrição será implementada com Whisper. "
-            "Por enquanto, envie sua mensagem em texto."
-        )
+        # Transcribe
+        try:
+            from src.audio.audio_tools import transcribe_audio
+            result = await transcribe_audio(audio_path)
+
+            if not result["success"]:
+                await self._safe_reply(
+                    update.message,
+                    f"Não consegui transcrever o áudio: {result['error']}\n"
+                    "Por enquanto, envie sua mensagem em texto."
+                )
+                return
+
+            transcribed_text = result["text"]
+            if not transcribed_text.strip():
+                await update.message.reply_text("Não detectei fala no áudio. Tente novamente.")
+                return
+
+            # Show transcription
+            await update.message.reply_text(f"🎤 _{transcribed_text}_", parse_mode=ParseMode.MARKDOWN)
+
+            # Process as normal text
+            response = await self._router.chat(transcribed_text, user_id, session_id)
+            await self._safe_reply(update.message, response)
+
+            # Try TTS response
+            try:
+                from src.audio.audio_tools import synthesize_speech, convert_wav_to_ogg
+                tts_result = await synthesize_speech(response)
+
+                if tts_result["success"]:
+                    ogg_path = await convert_wav_to_ogg(tts_result["audio_path"])
+                    if ogg_path and ogg_path.exists():
+                        with open(ogg_path, "rb") as audio_file:
+                            await update.message.reply_voice(voice=audio_file)
+                        ogg_path.unlink(missing_ok=True)
+                    if tts_result["audio_path"]:
+                        tts_result["audio_path"].unlink(missing_ok=True)
+            except ImportError:
+                pass  # TTS not available, text response is enough
+
+        except ImportError:
+            # Audio tools not installed yet
+            await update.message.reply_text(
+                "🎤 Áudio recebido, mas o módulo de transcrição ainda não está ativo.\n"
+                "Por enquanto, envie sua mensagem em texto."
+            )
+        except Exception as e:
+            logger.error("handle_audio.error", error=str(e))
+            await self._safe_reply(
+                update.message,
+                "Erro ao processar áudio. Tente enviar em texto."
+            )
+        finally:
+            audio_path.unlink(missing_ok=True)
 
     async def _handle_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle image messages."""
         user = await self._ensure_user(update)
         await update.message.reply_text("🖼️ Imagem recebida. Analisando...")
 
@@ -400,14 +441,11 @@ class TelegramBot:
         session_id = self._get_session_id(user.telegram_id)
 
         response = await self._router.chat(
-            f"[Imagem recebida] {caption}",
-            str(user.id),
-            session_id,
+            f"[Imagem recebida] {caption}", str(user.id), session_id,
         )
         await self._safe_reply(update.message, response)
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle document uploads."""
         user = await self._ensure_user(update)
         doc = update.message.document
         await self._safe_reply(
@@ -423,14 +461,11 @@ class TelegramBot:
         session_id = self._get_session_id(user.telegram_id)
 
         response = await self._router.chat(
-            f"[Documento: {doc.file_name}] {caption}",
-            str(user.id),
-            session_id,
+            f"[Documento: {doc.file_name}] {caption}", str(user.id), session_id,
         )
         await self._safe_reply(update.message, response)
 
     async def _send_generated_files(self, chat_id: int, result_text: str) -> None:
-        """Detect file paths in agent output and send them via Telegram."""
         import re
         file_patterns = re.findall(r'/tmp/simpleclaw_files/[^\s\n]+', result_text)
         for filepath_str in file_patterns:

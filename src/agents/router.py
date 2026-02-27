@@ -1,9 +1,8 @@
 """
-SimpleClaw v2.0 - Router Agent
+SimpleClaw v2.1 - Router Agent
 ================================
 Main orchestrator using Agno framework.
-Classifies intent, manages handoffs, and handles direct chat.
-Always-on with the lightweight model.
+Integrado com Sanity Layer para ground truth e validação de capabilities.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ logger = structlog.get_logger()
 
 
 class Intent(str, Enum):
-    """Classified user intents."""
     CHAT = "chat"
     TASK = "task"
     STATUS = "status"
@@ -38,13 +36,7 @@ class Intent(str, Enum):
 class RouterAgent:
     """
     Main orchestrator agent. Runs on the lightweight model (always-on).
-    
-    Responsibilities:
-    - Classify user intent
-    - Handle direct chat
-    - Generate task specifications for specialist delegation
-    - Manage conversation history per user
-    - Coordinate model preloading for specialist tasks
+    Integrado com HonestyEnforcer para prevenir confabulação.
     """
 
     def __init__(self):
@@ -55,27 +47,36 @@ class RouterAgent:
         self._initialized = False
 
     async def initialize(self) -> None:
-        """Initialize the router agent with Agno components."""
         if self._initialized:
             return
 
-        self._db = PostgresDb(
-            table_name="router_sessions",
-            db_url=self._settings.database_url,
-        )
+        self._db = PostgresDb(db_url=self._settings.database_url)
 
         model_config = self._settings.get_router_model_config()
         model = model_config.get_agno_model()
 
         from src.tools.agno_wrappers import get_router_tools
 
+        # Build instructions with honesty grounding from manifest
+        base_instructions = build_agent_instructions(self._persona)
+        try:
+            from src.sanity.sanity_layer import HonestyEnforcer
+            enforcer = HonestyEnforcer()
+            honesty_prompt = enforcer.get_identity_prompt()
+            if isinstance(base_instructions, list):
+                instructions = [honesty_prompt] + base_instructions
+            else:
+                instructions = f"{honesty_prompt}\n\n{base_instructions}"
+        except Exception:
+            instructions = base_instructions
+
         self._agent = Agent(
             name=self._persona.get("name", "SimpleClaw"),
             model=model,
-            instructions=build_agent_instructions(self._persona),
+            instructions=instructions,
             tools=get_router_tools(),
-            storage=self._db,
-            add_history_to_messages=True,
+            db=self._db,
+            add_history_to_context=True,
             num_history_runs=5,
             markdown=True,
         )
@@ -84,7 +85,6 @@ class RouterAgent:
         logger.info("router.initialized", model=self._settings.router_model_id)
 
     async def classify_intent(self, message: str) -> Intent:
-        """Classify user message intent. Fast pattern matching first, model fallback second."""
         lower = message.lower().strip()
 
         if lower.startswith("/"):
@@ -120,7 +120,6 @@ class RouterAgent:
         return Intent.CHAT
 
     async def _model_classify(self, message: str) -> Intent:
-        """Use the model for ambiguous intent classification."""
         if not self._agent:
             await self.initialize()
 
@@ -146,25 +145,32 @@ class RouterAgent:
             return Intent.CHAT
 
     async def chat(self, message: str, user_id: str, session_id: str) -> str:
-        """Handle direct chat (no specialist needed)."""
         if not self._agent:
             await self.initialize()
+
+        # Validate intent against capabilities before executing
+        try:
+            from src.sanity.sanity_layer import validate_intent_against_capabilities
+            intent = await self.classify_intent(message)
+            decision = validate_intent_against_capabilities(intent.value, message)
+
+            if decision.action == "impossible":
+                return f"Entendi seu pedido, mas {decision.reason} Posso ajudar com outra coisa?"
+        except ImportError:
+            pass
 
         from src.tools.tool_validator import safe_agent_run
 
         try:
             return await safe_agent_run(
-                self._agent,
-                message,
-                user_id=user_id,
-                session_id=session_id,
+                self._agent, message,
+                user_id=user_id, session_id=session_id,
             )
         except Exception as e:
             logger.error("router.chat_failed", error=str(e), user_id=user_id)
             return "Desculpe, tive um problema ao processar sua mensagem. Tente novamente."
 
     async def generate_task_spec(self, message: str, user_id: str) -> dict:
-        """Generate a technical specification for specialist delegation."""
         if not self._agent:
             await self.initialize()
 
@@ -182,11 +188,7 @@ class RouterAgent:
 
         try:
             from src.tools.tool_validator import safe_agent_run
-            content = await safe_agent_run(
-                self._agent,
-                prompt,
-                user_id=user_id,
-            )
+            content = await safe_agent_run(self._agent, prompt, user_id=user_id)
 
             return {
                 "raw_spec": content,
@@ -203,7 +205,6 @@ class RouterAgent:
             }
 
     async def format_status_response(self, tasks: list[dict], user_id: str) -> str:
-        """Format task status for the user."""
         if not tasks:
             return "Nenhuma tarefa na fila no momento. 🟢"
 
