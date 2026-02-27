@@ -119,7 +119,6 @@ class SpecialistManager:
 
         if not self._db:
             self._db = PostgresDb(
-                table_name="specialist_sessions",
                 db_url=self._settings.database_url,
             )
 
@@ -174,7 +173,6 @@ class SpecialistManager:
             raise RuntimeError("No specialist agents could be created")
 
         team_db = PostgresDb(
-            table_name="team_sessions",
             db_url=self._settings.database_url,
         )
 
@@ -183,7 +181,7 @@ class SpecialistManager:
             mode="coordinate",
             model=self._settings.get_specialist_model_config().get_agno_model(),
             members=list(self._agents.values()),
-            storage=team_db,
+            db=team_db,
             instructions=[
                 "Você coordena uma equipe de especialistas.",
                 "Delegue cada parte da tarefa ao especialista mais adequado.",

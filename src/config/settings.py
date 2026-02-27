@@ -200,6 +200,16 @@ class Settings(BaseSettings):
     backup_base_path: str = str(BACKUP_DIR)
     log_path: str = str(LOG_DIR)
 
+    # ── Redis ──────────────────────────────
+    redis_url: str = "redis://localhost:6379/0"
+
+    # ── Audio / TTS ─────────────────────────
+    whisper_provider: str = "groq"  # groq or openai
+    whisper_api_key: Optional[str] = None  # Falls back to router_api_key if not set
+    tts_enabled: bool = False
+    tts_voice: str = "pt_BR-faber-medium"
+
+
     # ── Computed ─────────────────────────────
 
     def get_router_model_config(self) -> ModelConfig:
