@@ -96,6 +96,8 @@ def classify_error(error: Exception) -> ErrorSeverity:
         "permission denied", "no such file", "not found",
         "missing", "dependency", "module", "import",
         "could not connect", "connection refused",
+        "tool_use_failed", "not in request.tools",
+        "is not defined", "tool call validation",
     ]
     if any(s in msg for s in recoverable_signals):
         return ErrorSeverity.RECOVERABLE
@@ -340,6 +342,9 @@ class TaskExecutor:
                     session_id=session_id,
                 )
                 result = response.content if hasattr(response, "content") else str(response)
+
+                # Fallback: if tool validation failed inside team, it returns gracefully
+                # but we should still check
 
                 # Success — checkpoint
                 git.checkpoint(f"Execução bem-sucedida (tentativa {attempt})")

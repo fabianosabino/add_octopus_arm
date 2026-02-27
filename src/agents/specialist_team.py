@@ -15,7 +15,7 @@ from typing import Optional
 import httpx
 import structlog
 from agno.agent import Agent
-from agno.storage.postgres import PostgresStorage
+from agno.db.postgres import PostgresDb
 from agno.team.team import Team
 
 from src.config.settings import get_settings, ModelProvider
@@ -45,7 +45,7 @@ class SpecialistManager:
         self._team: Optional[Team] = None
         self._agents: dict[str, Agent] = {}
         self._model_loaded = False
-        self._storage: Optional[PostgresStorage] = None
+        self._db: Optional[PostgresDb] = None
         self._notify_callback = None  # Set by telegram bot for progress updates
 
     def set_notify_callback(self, callback) -> None:
@@ -117,8 +117,8 @@ class SpecialistManager:
         model_config = self._settings.get_specialist_model_config()
         model = model_config.get_agno_model()
 
-        if not self._storage:
-            self._storage = PostgresStorage(
+        if not self._db:
+            self._db = PostgresDb(
                 table_name="specialist_sessions",
                 db_url=self._settings.database_url,
             )
@@ -148,7 +148,7 @@ class SpecialistManager:
                     instructions=build_agent_instructions(persona),
                     description=build_agent_description(persona),
                     tools=tool_map[name],
-                    storage=self._storage,
+                    db=self._db,
                     add_history_to_messages=True,
                     num_history_runs=3,
                     markdown=True,
@@ -173,7 +173,7 @@ class SpecialistManager:
         if not self._agents:
             raise RuntimeError("No specialist agents could be created")
 
-        team_storage = PostgresStorage(
+        team_db = PostgresDb(
             table_name="team_sessions",
             db_url=self._settings.database_url,
         )
@@ -183,7 +183,7 @@ class SpecialistManager:
             mode="coordinate",
             model=self._settings.get_specialist_model_config().get_agno_model(),
             members=list(self._agents.values()),
-            storage=team_storage,
+            storage=team_db,
             instructions=[
                 "Você coordena uma equipe de especialistas.",
                 "Delegue cada parte da tarefa ao especialista mais adequado.",

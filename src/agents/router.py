@@ -14,7 +14,7 @@ from typing import Optional
 
 import structlog
 from agno.agent import Agent
-from agno.storage.postgres import PostgresStorage
+from agno.db.postgres import PostgresDb
 
 from src.config.settings import get_settings
 from src.config.persona_loader import load_persona, build_agent_instructions
@@ -51,7 +51,7 @@ class RouterAgent:
         self._settings = get_settings()
         self._persona = load_persona("router")
         self._agent: Optional[Agent] = None
-        self._storage: Optional[PostgresStorage] = None
+        self._db: Optional[PostgresDb] = None
         self._initialized = False
 
     async def initialize(self) -> None:
@@ -59,7 +59,7 @@ class RouterAgent:
         if self._initialized:
             return
 
-        self._storage = PostgresStorage(
+        self._db = PostgresDb(
             table_name="router_sessions",
             db_url=self._settings.database_url,
         )
@@ -74,7 +74,7 @@ class RouterAgent:
             model=model,
             instructions=build_agent_instructions(self._persona),
             tools=get_router_tools(),
-            storage=self._storage,
+            storage=self._db,
             add_history_to_messages=True,
             num_history_runs=5,
             markdown=True,
@@ -132,8 +132,9 @@ class RouterAgent:
         )
 
         try:
-            response = self._agent.run(prompt)
-            content = response.content.strip().lower() if hasattr(response, "content") else ""
+            from src.tools.tool_validator import safe_agent_run
+            content = await safe_agent_run(self._agent, prompt)
+            content = content.strip().lower()
 
             for intent in Intent:
                 if intent.value in content:
@@ -149,13 +150,15 @@ class RouterAgent:
         if not self._agent:
             await self.initialize()
 
+        from src.tools.tool_validator import safe_agent_run
+
         try:
-            response = self._agent.run(
+            return await safe_agent_run(
+                self._agent,
                 message,
                 user_id=user_id,
                 session_id=session_id,
             )
-            return response.content if hasattr(response, "content") else str(response)
         except Exception as e:
             logger.error("router.chat_failed", error=str(e), user_id=user_id)
             return "Desculpe, tive um problema ao processar sua mensagem. Tente novamente."
@@ -178,8 +181,12 @@ class RouterAgent:
         )
 
         try:
-            response = self._agent.run(prompt, user_id=user_id)
-            content = response.content if hasattr(response, "content") else str(response)
+            from src.tools.tool_validator import safe_agent_run
+            content = await safe_agent_run(
+                self._agent,
+                prompt,
+                user_id=user_id,
+            )
 
             return {
                 "raw_spec": content,
