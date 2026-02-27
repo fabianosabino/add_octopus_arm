@@ -7,6 +7,7 @@ Integrado com Sanity Layer para ground truth e validação de capabilities.
 
 from __future__ import annotations
 
+from src.core.llm_gateway import LLMGateway
 import uuid
 from enum import Enum
 from typing import Optional
@@ -131,15 +132,19 @@ class RouterAgent:
         )
 
         try:
-            from src.tools.tool_validator import safe_agent_run
-            content = await safe_agent_run(self._agent, prompt)
-            content = content.strip().lower()
+            gateway = LLMGateway.get_instance()
+            response = await gateway.generate(
+                prompt=prompt,
+                agent_name="router",
+            )
+            content = response.content.strip().lower()
 
             for intent in Intent:
                 if intent.value in content:
                     return intent
 
             return Intent.TASK
+        
         except Exception as e:
             logger.error("router.classify_failed", error=str(e))
             return Intent.CHAT
@@ -159,13 +164,15 @@ class RouterAgent:
         except ImportError:
             pass
 
-        from src.tools.tool_validator import safe_agent_run
-
         try:
-            return await safe_agent_run(
-                self._agent, message,
-                user_id=user_id, session_id=session_id,
+            gateway = LLMGateway.get_instance()
+            response = await gateway.generate(
+                prompt=message,
+                agent_name="router",
+                user_id=user_id,
+                session_id=session_id,
             )
+            return response.content
         except Exception as e:
             logger.error("router.chat_failed", error=str(e), user_id=user_id)
             return "Desculpe, tive um problema ao processar sua mensagem. Tente novamente."
@@ -187,8 +194,13 @@ class RouterAgent:
         )
 
         try:
-            from src.tools.tool_validator import safe_agent_run
-            content = await safe_agent_run(self._agent, prompt, user_id=user_id)
+            gateway = LLMGateway.get_instance()
+            response = await gateway.generate(
+                prompt=prompt,
+                agent_name="router",
+                user_id=user_id,
+            )
+            content = response.content
 
             return {
                 "raw_spec": content,
