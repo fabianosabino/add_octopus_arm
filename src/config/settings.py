@@ -1,7 +1,7 @@
 """
-SimpleClaw v2.0 - Configuration
+SimpleClaw v3.0 - Configuration
 ================================
-Whitelabel settings with provider-agnostic model configuration.
+Whitelabel settings. Provider-agnostic. Zero hardcoded URLs.
 All sensitive values come from environment or vault.
 """
 
@@ -41,76 +41,12 @@ LOG_DIR = BASE_DIR / "logs"
 PERSONAS_DIR = Path(__file__).resolve().parent / "personas"
 
 
-# ─── MODEL CONFIGURATION ───────────────────────────────────
-
-class ModelConfig(BaseSettings):
-    """Configuration for a single model slot (router or specialist)."""
-
-    model_config = SettingsConfigDict(extra="ignore")
-
-    provider: ModelProvider = ModelProvider.OLLAMA
-    model_id: str = "qwen3:0.6b"
-    api_key: Optional[str] = None
-    api_base: Optional[str] = None
-    temperature: float = 0.7
-    max_tokens: int = 4096
-    timeout_seconds: int = 120
-
-    def get_agno_model(self):
-        """Return the appropriate Agno model instance."""
-        if self.provider == ModelProvider.OLLAMA:
-            from agno.models.ollama import Ollama
-            return Ollama(
-                id=self.model_id,
-                host=self.api_base or "http://localhost:11434",
-                options={"temperature": self.temperature},
-            )
-        elif self.provider == ModelProvider.OPENAI:
-            from agno.models.openai import OpenAIChat
-            return OpenAIChat(
-                id=self.model_id,
-                api_key=self.api_key,
-                base_url=self.api_base,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
-        elif self.provider == ModelProvider.ANTHROPIC:
-            from agno.models.anthropic import Claude
-            return Claude(
-                id=self.model_id,
-                api_key=self.api_key,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
-        elif self.provider == ModelProvider.GROQ:
-            from agno.models.groq import Groq
-            return Groq(
-                id=self.model_id,
-                api_key=self.api_key,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
-        elif self.provider == ModelProvider.LITELLM:
-            from agno.models.litellm import LiteLLM
-            return LiteLLM(
-                id=self.model_id,
-                api_key=self.api_key,
-                api_base=self.api_base,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
-        else:
-            raise ValueError(f"Unsupported provider: {self.provider}")
-
-
 # ─── MAIN SETTINGS ─────────────────────────────────────────
 
 class Settings(BaseSettings):
     """
     SimpleClaw global settings.
-    
     Reads from environment variables with SIMPLECLAW_ prefix.
-    Example: SIMPLECLAW_TELEGRAM_TOKEN=xxx
     """
 
     model_config = SettingsConfigDict(
@@ -123,96 +59,100 @@ class Settings(BaseSettings):
 
     # ── Identity ─────────────────────────────
     app_name: str = "SimpleClaw"
-    app_version: str = "2.0.0"
+    app_version: str = "3.0.0"
     debug: bool = False
     log_level: LogLevel = LogLevel.INFO
 
-    # ── Telegram ─────────────────────────────
+    # ── Engine ────────────────────────────────
+    engine: str = "loop"  # "loop" (agent loop) ou "agno" (legado)
+
+    # ── Telegram ──────────────────────────────
     telegram_token: str = ""
     telegram_admin_ids: list[int] = Field(default_factory=list)
     telegram_max_concurrent_users: int = 50
 
-    # ── Database ─────────────────────────────
+    # ── Database ──────────────────────────────
     database_url: str = "postgresql+psycopg://simpleclaw:simpleclaw@localhost:5432/simpleclaw"
     db_pool_size: int = 10
     db_max_overflow: int = 20
     system_schema: str = "system"
     agent_schema: str = "agent"
 
-    # ── Router Model (always on) ─────────────
-    router_provider: ModelProvider = ModelProvider.OLLAMA
-    router_model_id: str = "qwen3:0.6b"
+    # ── Redis ─────────────────────────────────
+    redis_url: str = "redis://localhost:6379/0"
+
+    # ── Sessions ──────────────────────────────
+    sessions_dir: str = "/var/simpleclaw/sessions"
+
+    # ── Router Model ──────────────────────────
+    router_provider: ModelProvider = ModelProvider.GROQ
+    router_model_id: str = "llama-3.1-8b-instant"
     router_api_key: Optional[str] = None
-    router_api_base: Optional[str] = None
-    router_temperature: float = 0.7
+    router_api_base: Optional[str] = None  # OBRIGATÓRIO no engine=loop
+    router_temperature: float = 0.3
     router_max_tokens: int = 4096
 
-    # ── Specialist Model (on demand) ─────────
-    specialist_provider: ModelProvider = ModelProvider.OLLAMA
-    specialist_model_id: str = "nanbeige4.1:3b"
+    # ── Specialist Model (legado Agno) ────────
+    specialist_provider: ModelProvider = ModelProvider.GROQ
+    specialist_model_id: str = "llama-3.1-8b-instant"
     specialist_api_key: Optional[str] = None
     specialist_api_base: Optional[str] = None
-    specialist_temperature: float = 0.4
+    specialist_temperature: float = 0.2
     specialist_max_tokens: int = 8192
 
-    # ── RAM Management ───────────────────────
-    max_ram_router_gb: float = 0.8
-    max_ram_specialist_gb: float = 2.5
-    preload_specialist_on_interaction: bool = True
-
-    # ── Context ──────────────────────────────
+    # ── Context ───────────────────────────────
     max_context_tokens: int = 131_000
     compress_threshold_tokens: int = 80_000
 
-    # ── Timeouts ─────────────────────────────
+    # ── Timeouts ──────────────────────────────
     heartbeat_interval_seconds: int = 240
     heartbeat_timeout_seconds: int = 900
     task_max_retries: int = 3
-    specialist_preload_timeout_seconds: int = 45
 
-    # ── Isolation (subprocess + venv) ────────
+    # ── Isolation ─────────────────────────────
     worker_base_dir: str = "/tmp/simpleclaw_workers"
     worker_timeout_after_task_minutes: int = 25
     worker_max_concurrent: int = 2
 
-    # ── Search ───────────────────────────────
+    # ── Search ────────────────────────────────
     searxng_url: str = "http://localhost:8888"
     searxng_timeout_seconds: int = 15
 
-    # ── Vault ────────────────────────────────
-    vault_master_key: str = ""  # Must be set in env
+    # ── Vault ─────────────────────────────────
+    vault_master_key: str = ""
     vault_rotation_days: int = 90
 
-    # ── Cost Tracking ────────────────────────
+    # ── Cost Tracking ─────────────────────────
     enable_cost_tracking: bool = True
     cost_alert_threshold_usd: float = 10.0
 
-    # ── History ──────────────────────────────
-    history_compress_after_days: int = 30
-    history_review_cron: str = "0 10 * * 1"  # Every Monday 10am
+    # ── Audio / TTS ───────────────────────────
+    whisper_provider: str = "groq"
+    whisper_api_key: Optional[str] = None
+    tts_enabled: bool = False
+    tts_voice: str = "pt_BR-faber-medium"
 
-    # ── Backup ───────────────────────────────
-    backup_cron: str = "0 3 * * *"  # Daily 3am
+    # ── Superset ──────────────────────────────
+    superset_url: str = "http://localhost:8088"
+    superset_username: str = "admin"
+    superset_password: str = "admin"
+
+    # ── Backup ────────────────────────────────
+    backup_cron: str = "0 3 * * *"
     backup_retention_days: int = 30
+    history_compress_after_days: int = 30
+    history_review_cron: str = "0 10 * * 1"
 
-    # ── Paths ────────────────────────────────
+    # ── Paths ─────────────────────────────────
     context_base_path: str = str(CONTEXT_DIR)
     backup_base_path: str = str(BACKUP_DIR)
     log_path: str = str(LOG_DIR)
 
-    # ── Redis ──────────────────────────────
-    redis_url: str = "redis://localhost:6379/0"
+    # ── Computed ──────────────────────────────
 
-    # ── Audio / TTS ─────────────────────────
-    whisper_provider: str = "groq"  # groq or openai
-    whisper_api_key: Optional[str] = None  # Falls back to router_api_key if not set
-    tts_enabled: bool = False
-    tts_voice: str = "pt_BR-faber-medium"
-
-
-    # ── Computed ─────────────────────────────
-
-    def get_router_model_config(self) -> ModelConfig:
+    def get_router_model_config(self):
+        """For legacy Agno compatibility."""
+        from src.config.settings import ModelConfig
         return ModelConfig(
             provider=self.router_provider,
             model_id=self.router_model_id,
@@ -220,16 +160,6 @@ class Settings(BaseSettings):
             api_base=self.router_api_base,
             temperature=self.router_temperature,
             max_tokens=self.router_max_tokens,
-        )
-
-    def get_specialist_model_config(self) -> ModelConfig:
-        return ModelConfig(
-            provider=self.specialist_provider,
-            model_id=self.specialist_model_id,
-            api_key=self.specialist_api_key,
-            api_base=self.specialist_api_base,
-            temperature=self.specialist_temperature,
-            max_tokens=self.specialist_max_tokens,
         )
 
     @field_validator("vault_master_key")
@@ -240,13 +170,25 @@ class Settings(BaseSettings):
         return v
 
 
+class ModelConfig(BaseSettings):
+    """Configuration for a single model slot."""
+    model_config = SettingsConfigDict(extra="ignore")
+
+    provider: ModelProvider = ModelProvider.GROQ
+    model_id: str = "llama-3.1-8b-instant"
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+    temperature: float = 0.3
+    max_tokens: int = 4096
+    timeout_seconds: int = 120
+
+
 # ─── SINGLETON ──────────────────────────────────────────────
 
 _settings: Optional[Settings] = None
 
 
 def get_settings() -> Settings:
-    """Get or create the global settings singleton."""
     global _settings
     if _settings is None:
         _settings = Settings()
