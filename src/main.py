@@ -1,5 +1,5 @@
 """
-SimpleClaw v2.0 - Main Entry Point
+SimpleClaw v3.0 - Main Entry Point
 ====================================
 Orchestrates initialization and lifecycle of all components.
 """
@@ -13,7 +13,6 @@ from pathlib import Path
 
 import structlog
 
-# Configure structured logging
 structlog.configure(
     processors=[
         structlog.contextvars.merge_contextvars,
@@ -37,18 +36,15 @@ logger = structlog.get_logger()
 async def main() -> None:
     """Initialize and run SimpleClaw."""
     from src.config.settings import get_settings
-    from src.storage.database import init_database, close_database
     from src.interfaces.telegram_bot import TelegramBot
-    from src.scheduler.cron_jobs import SchedulerService
-    from src.tools.watchdog import Watchdog
 
     settings = get_settings()
     logger.info(
         "simpleclaw.starting",
         version=settings.app_version,
+        engine=settings.engine,
         debug=settings.debug,
-        router_model=f"{settings.router_provider.value}/{settings.router_model_id}",
-        specialist_model=f"{settings.specialist_provider.value}/{settings.specialist_model_id}",
+        model=f"{settings.router_provider.value}/{settings.router_model_id}",
     )
 
     # Ensure directories exist
@@ -57,45 +53,55 @@ async def main() -> None:
         f"{settings.context_base_path}/pending",
         f"{settings.context_base_path}/processing",
         f"{settings.context_base_path}/completed",
-        f"{settings.context_base_path}/interrupt",
         settings.backup_base_path,
-        f"{settings.backup_base_path}/daily",
-        f"{settings.backup_base_path}/pre_task",
         settings.log_path,
+        settings.sessions_dir,
     ]:
         Path(dir_path).mkdir(parents=True, exist_ok=True)
 
-    # Initialize database
-    await init_database()
-    logger.info("simpleclaw.database_ready")
+    # Initialize database (if available)
+    try:
+        from src.storage.database import init_database, close_database
+        await init_database()
+        logger.info("simpleclaw.database_ready")
+        db_initialized = True
+    except Exception as e:
+        logger.warning("simpleclaw.database_unavailable", error=str(e)[:200])
+        db_initialized = False
 
-    # Initialize scheduler
-    scheduler = SchedulerService()
+    # Initialize scheduler (if available)
+    scheduler = None
+    try:
+        from src.scheduler.cron_jobs import SchedulerService
+        scheduler = SchedulerService()
+    except Exception:
+        logger.warning("simpleclaw.scheduler_unavailable")
 
     # Initialize Telegram bot
     telegram_bot = TelegramBot()
 
-    # Initialize watchdog
-    watchdog = Watchdog()
-    telegram_bot.set_watchdog(watchdog)
-
-    # Wire scheduler -> telegram for notifications
-    scheduler.set_telegram_bot(telegram_bot)
-
-    # Start watchdog
-    await watchdog.start()
-    logger.info("simpleclaw.watchdog_ready")
+    # Initialize watchdog (if available)
+    watchdog = None
+    try:
+        from src.tools.watchdog import Watchdog
+        watchdog = Watchdog()
+        telegram_bot.set_watchdog(watchdog)
+        await watchdog.start()
+        logger.info("simpleclaw.watchdog_ready")
+    except Exception:
+        logger.warning("simpleclaw.watchdog_unavailable")
 
     # Start scheduler
-    await scheduler.start()
-    logger.info("simpleclaw.scheduler_ready")
+    if scheduler:
+        scheduler.set_telegram_bot(telegram_bot)
+        await scheduler.start()
+        logger.info("simpleclaw.scheduler_ready")
 
-    # Start Telegram bot (blocking)
+    # Start Telegram bot
     try:
         await telegram_bot.start()
         logger.info("simpleclaw.ready", message="All systems operational 🟢")
 
-        # Keep running until interrupted
         stop_event = asyncio.Event()
 
         def signal_handler():
@@ -112,14 +118,17 @@ async def main() -> None:
     finally:
         logger.info("simpleclaw.shutting_down")
         await telegram_bot.stop()
-        await watchdog.stop()
-        await scheduler.stop()
-        await close_database()
+        if watchdog:
+            await watchdog.stop()
+        if scheduler:
+            await scheduler.stop()
+        if db_initialized:
+            from src.storage.database import close_database
+            await close_database()
         logger.info("simpleclaw.stopped")
 
 
 def run() -> None:
-    """Entry point for the application."""
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

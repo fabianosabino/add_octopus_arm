@@ -20,6 +20,22 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── Redis (Task Queue + Cache) ───────────
+  redis:
+    image: redis:7-alpine
+    container_name: simpleclaw_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   # ── SearXNG (Web Search) ──────────────────
   searxng:
     image: searxng/searxng:latest
@@ -70,12 +86,17 @@ services:
       SIMPLECLAW_DATABASE_URL: postgresql+psycopg://simpleclaw:simpleclaw@postgres:5432/simpleclaw
       SIMPLECLAW_SEARXNG_URL: http://searxng:8080
       SIMPLECLAW_SUPERSET_URL: http://superset:8088
+      SIMPLECLAW_REDIS_URL: redis://redis:6379/0
+      SIMPLECLAW_SESSIONS_DIR: /var/simpleclaw/sessions
     volumes:
       - ./context:/app/context
       - ./backups:/app/backups
       - ./logs:/app/logs
+      - sessions_data:/var/simpleclaw/sessions
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       searxng:
         condition: service_started
@@ -83,25 +104,6 @@ services:
 
 volumes:
   pgdata:
-  superset_data:
-
-# Adicionar ao docker-compose.yaml existente:
-
-  redis:
-    image: redis:7-alpine
-    container_name: simpleclaw_redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-
-# Adicionar em volumes:
-volumes:
   redis_data:
+  superset_data:
+  sessions_data:

@@ -1,59 +1,61 @@
-# SimpleClaw v2.0 - Pinned Dependencies
-# ======================================
+# SimpleClaw v3.0 - Dependencies
+# ================================
 
-# Core Framework
+# ── Core (Agent Loop) ────────────────────
+httpx==0.28.1
+redis==5.2.1
+
+# ── Agno (Legacy fallback - remover quando loop estiver estável) ──
 agno[os,ollama,openai,anthropic,postgres,async-postgres,pgvector,sqlite,mcp,ddg]==2.5.3
 
-# Telegram Interface
+# ── Telegram Interface ───────────────────
 python-telegram-bot[job-queue]==21.10
 
-# Database
+# ── Database ─────────────────────────────
 sqlalchemy==2.0.36
 psycopg[binary]==3.2.4
 pgvector==0.3.6
 alembic==1.14.1
 
-# Security (Vault)
+# ── Security (Vault) ────────────────────
 cryptography==44.0.0
 
-# Scheduling
+# ── Scheduling ───────────────────────────
 APScheduler==3.10.4
 
-# Context Management
+# ── Context ──────────────────────────────
 tiktoken==0.9.0
 
-# File Generation
+# ── File Generation ──────────────────────
 reportlab==4.2.5
 python-docx==1.1.2
 openpyxl==3.1.5
 matplotlib==3.10.0
 Pillow==11.1.0
 
-# Audio Transcription
-openai-whisper==20240930
-# Fallback: SpeechRecognition==3.12.0
+# ── Web Search (SearXNG client) ─────────
+# httpx already listed above
 
-# Web Search (SearXNG client)
-httpx==0.28.1
-
-# Docker Management
+# ── Docker Management ────────────────────
 docker==7.1.0
 
-# Process Isolation
+# ── Process Isolation ────────────────────
 psutil==6.1.1
 
-# Git
+# ── Git ──────────────────────────────────
 gitpython==3.1.44
 
-# Utilities
+# ── Sanity Layer ─────────────────────────
+pyyaml==6.0.2
+
+# ── Utilities ────────────────────────────
 pydantic==2.10.5
 pydantic-settings==2.7.1
-pyyaml==6.0.2
 python-dotenv==1.0.1
 structlog==24.4.0
 tenacity==9.0.0
 
-# Testing
+# ── Testing ──────────────────────────────
 pytest==8.3.4
 pytest-asyncio==0.25.0
 pytest-cov==6.0.0
