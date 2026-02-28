@@ -7,6 +7,9 @@ search:
   safe_search: 0
   autocomplete: ""
   default_lang: "pt-BR"
+  formats:
+    - html
+    - json
 engines:
   - name: google
     engine: google

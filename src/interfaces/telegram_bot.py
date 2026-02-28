@@ -526,8 +526,10 @@ class TelegramBot:
 
     async def _send_generated_files(self, chat_id: int, result_text: str) -> None:
         """Detect file paths in agent output and send them via Telegram."""
-        file_patterns = re.findall(r'/tmp/simpleclaw[_\w]*/[^\s\n]+', result_text)
+        file_patterns = re.findall(r'/tmp/simpleclaw[_\w]*/[\w./\-]+', result_text)
         for filepath_str in file_patterns:
+            # Strip trailing punctuation that regex might catch
+            filepath_str = filepath_str.rstrip('.,;:!?)')
             filepath = Path(filepath_str)
             if filepath.exists() and filepath.is_file():
                 await self._send_file(chat_id, filepath)

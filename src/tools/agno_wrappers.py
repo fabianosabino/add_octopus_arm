@@ -1,18 +1,32 @@
 """
-SimpleClaw v2.0 - Agno Tool Wrappers
-=======================================
-Wraps SimpleClaw tools as Agno-compatible tool functions.
-These get passed to Agent(tools=[...]) so agents can call them.
+SimpleClaw v3.0 - Tool Functions
+==================================
+Funções síncronas que as tools do agent loop chamam.
+Compatível com event loop existente (Telegram async).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Optional
 
 import structlog
 
 logger = structlog.get_logger()
+
+
+def _run_async(coro):
+    """Run async coroutine from sync context, compatible with running event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+        # Already inside an event loop — use nest_asyncio or thread
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(asyncio.run, coro).result(timeout=120)
+    except RuntimeError:
+        # No running loop — safe to use asyncio.run
+        return asyncio.run(coro)
 
 
 # ─── SEARCH ─────────────────────────────────────────────────
@@ -28,20 +42,10 @@ def search_web(query: str, max_results: int = 5) -> str:
     Returns:
         Resultados formatados da pesquisa
     """
-    import asyncio
     from src.tools.searxng_search import searxng_search, format_search_results
 
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                results = pool.submit(
-                    asyncio.run,
-                    searxng_search(query, max_results=max_results)
-                ).result()
-        else:
-            results = asyncio.run(searxng_search(query, max_results=max_results))
+        results = _run_async(searxng_search(query, max_results=max_results))
         return format_search_results(results)
     except Exception as e:
         return f"Erro na pesquisa: {str(e)}"
@@ -60,7 +64,6 @@ def run_sql(query: str, database: str = "internal") -> str:
     Returns:
         Resultado formatado da query
     """
-    import asyncio
     from src.tools.sql_executor import (
         execute_internal,
         execute_external,
@@ -69,9 +72,9 @@ def run_sql(query: str, database: str = "internal") -> str:
 
     try:
         if database == "internal":
-            result = asyncio.run(execute_internal(query))
+            result = _run_async(execute_internal(query))
         else:
-            result = asyncio.run(execute_external(database, query))
+            result = _run_async(execute_external(database, query))
         return format_query_result(result)
     except Exception as e:
         return f"Erro SQL: {str(e)}"
@@ -206,7 +209,6 @@ def execute_python(code: str, task_id: str = "default", packages: str = "") -> s
     Returns:
         Saída da execução (stdout + stderr + arquivos criados)
     """
-    import asyncio
     from src.tools.process_manager import ProcessManager
 
     try:
@@ -215,11 +217,11 @@ def execute_python(code: str, task_id: str = "default", packages: str = "") -> s
         # Install packages if needed
         if packages:
             pkg_list = [p.strip() for p in packages.split(",") if p.strip()]
-            install_result = asyncio.run(pm.install_packages(task_id, pkg_list))
+            install_result = _run_async(pm.install_packages(task_id, pkg_list))
             if not install_result.get("success"):
                 return f"Erro ao instalar pacotes: {install_result.get('stderr', install_result.get('error', ''))}"
 
-        result = asyncio.run(pm.execute_code(task_id, code))
+        result = _run_async(pm.execute_code(task_id, code))
 
         output_parts = []
         if result.get("stdout"):
