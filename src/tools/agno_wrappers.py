@@ -53,27 +53,36 @@ def search_web(query: str, max_results: int = 5) -> str:
 
 # ─── SQL ─────────────────────────────────────────────────────
 
-def run_sql(query: str, database: str = "internal") -> str:
+def run_sql(query: str, database: str = "userdata") -> str:
     """
     Executar query SQL no banco de dados.
 
     Args:
         query: Query SQL a ser executada
-        database: 'internal' para o banco do SimpleClaw, ou nome da credencial no vault para bancos externos
+        database: 'userdata' para o banco de dados do usuário (padrão), 'system' para consultar o banco interno (somente leitura), ou nome da credencial no vault para bancos externos
 
     Returns:
         Resultado formatado da query
     """
     from src.tools.sql_executor import (
         execute_internal,
+        execute_userdata,
         execute_external,
         format_query_result,
+        _is_write,
     )
 
     try:
-        if database == "internal":
+        if database == "system":
+            # System DB: read-only for the model
+            if _is_write(query):
+                return "❌ O banco de sistema é somente leitura. Use database='userdata' para criar tabelas e inserir dados."
             result = _run_async(execute_internal(query))
+        elif database in ("userdata", "internal"):
+            # Userdata DB: full access
+            result = _run_async(execute_userdata(query))
         else:
+            # External DB: via vault
             result = _run_async(execute_external(database, query))
         return format_query_result(result)
     except Exception as e:
