@@ -19,9 +19,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ src/
 COPY context/ context/
 
+# Create directories
+RUN mkdir -p /var/simpleclaw/sessions /tmp/simpleclaw_files /tmp/simpleclaw_workers
+
 # Create non-root user
 RUN useradd -m -s /bin/bash simpleclaw && \
-    chown -R simpleclaw:simpleclaw /app
+    chown -R simpleclaw:simpleclaw /app /var/simpleclaw /tmp/simpleclaw_files /tmp/simpleclaw_workers
 
 USER simpleclaw
 
