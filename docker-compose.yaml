@@ -89,10 +89,8 @@ services:
       SIMPLECLAW_REDIS_URL: redis://redis:6379/0
       SIMPLECLAW_SESSIONS_DIR: /var/simpleclaw/sessions
     volumes:
-      - ./context:/app/context
-      - ./backups:/app/backups
-      - ./logs:/app/logs
       - sessions_data:/var/simpleclaw/sessions
+      - logs_data:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -107,3 +105,4 @@ volumes:
   redis_data:
   superset_data:
   sessions_data:
+  logs_data:
