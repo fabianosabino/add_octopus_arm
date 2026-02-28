@@ -1,13 +1,14 @@
 """
-SimpleClaw v2.1 - Telegram Interface
+SimpleClaw v3.0 - Telegram Interface
 ======================================
 Multi-tenant bot com debug window, áudio via Whisper/Piper,
-e integração com Sanity Layer.
+e integração com Engine Adapter (agent loop ou Agno via .env).
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -24,9 +25,7 @@ from telegram.ext import (
 )
 
 from src.config.settings import get_settings
-from src.agents.router import RouterAgent, Intent
-from src.agents.specialist_team import SpecialistManager
-from src.agents.task_executor import TaskExecutor
+from src.core.engine_adapter import EngineAdapter
 from src.storage.database import get_session
 from src.storage.models import User, Task, TaskStatus
 from src.tools.cost_tracker import get_user_cost_summary
@@ -37,14 +36,12 @@ logger = structlog.get_logger()
 class TelegramBot:
     """
     Multi-tenant Telegram bot interface.
-    Debug window, audio transcription, and Sanity Layer integration.
+    Debug window, audio transcription, and Engine Adapter integration.
     """
 
     def __init__(self):
         self._settings = get_settings()
-        self._router = RouterAgent()
-        self._specialist = SpecialistManager()
-        self._task_executor: Optional[TaskExecutor] = None
+        self._engine = EngineAdapter()
         self._app: Optional[Application] = None
         self._active_tasks: dict[int, bool] = {}
         self._watchdog = None
@@ -55,20 +52,14 @@ class TelegramBot:
             watchdog.set_notify_callback(self._notify_admin)
 
     async def start(self) -> None:
-        await self._router.initialize()
-
-        self._task_executor = TaskExecutor(self._specialist, self._router)
-        self._task_executor.set_notify_callback(self._send_progress)
-        self._specialist.set_notify_callback(self._send_progress)
+        """Initialize and start the Telegram bot."""
+        await self._engine.initialize()
 
         self._app = (
             Application.builder()
             .token(self._settings.telegram_token)
             .build()
         )
-
-        # Pass app reference to task executor for debug window
-        self._task_executor.set_bot_app(self._app)
 
         # Register handlers
         self._app.add_handler(CommandHandler("start", self._cmd_start))
@@ -78,6 +69,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("cost", self._cmd_cost))
         self._app.add_handler(CommandHandler("new", self._cmd_new_session))
         self._app.add_handler(CommandHandler("health", self._cmd_health))
+        self._app.add_handler(CommandHandler("debug", self._cmd_debug))
 
         # Message handlers
         self._app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, self._handle_audio))
@@ -93,9 +85,10 @@ class TelegramBot:
             BotCommand("cost", "Ver custos de API"),
             BotCommand("new", "Nova sessão de conversa"),
             BotCommand("health", "Status de saúde do sistema"),
+            BotCommand("debug", "Info de debug"),
         ])
 
-        logger.info("telegram.started")
+        logger.info("telegram.started", engine=self._engine.engine_type)
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)
@@ -105,7 +98,7 @@ class TelegramBot:
             await self._app.updater.stop()
             await self._app.stop()
             await self._app.shutdown()
-        await self._specialist.shutdown()
+        await self._engine.shutdown()
         logger.info("telegram.stopped")
 
     # ─── HELPERS ─────────────────────────────────────────────
@@ -158,21 +151,19 @@ class TelegramBot:
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = await self._ensure_user(update)
         name = user.display_name or user.username or "usuário"
+        engine = self._engine.engine_type
         await update.message.reply_text(
             f"👋 Olá, {name}! Sou o *SimpleClaw*, seu assistente pessoal.\n\n"
-            "Posso te ajudar com:\n"
+            "Posso *executar* tarefas reais:\n"
             "• 💬 Conversas e perguntas\n"
             "• 📋 Tarefas técnicas (código, banco de dados, relatórios)\n"
             "• 🔍 Pesquisas na web\n"
             "• 📊 Geração de arquivos (PDF, DOCX, XLSX)\n"
             "• 🎤 Áudio (envie mensagem de voz)\n"
             "• 💰 Controle de custos de API\n\n"
-            "Use /help para ver todos os comandos.",
+            f"Engine: `{engine}` | Use /help para ver todos os comandos.",
             parse_mode=ParseMode.MARKDOWN,
         )
-
-        if self._settings.preload_specialist_on_interaction:
-            asyncio.create_task(self._specialist.preload_model())
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
@@ -182,40 +173,69 @@ class TelegramBot:
             "/pause — Pausar tarefa em andamento\n"
             "/cost — Ver custos de API do mês\n"
             "/new — Iniciar nova sessão de conversa\n"
+            "/debug — Info de debug\n"
             "/help — Esta mensagem\n\n"
             "💡 *Dicas:*\n"
             "• Envie texto para conversar ou solicitar tarefas\n"
             "• Envie áudio para transcrição e resposta por voz\n"
             "• Envie imagens para análise\n"
-            "• Envie documentos para processamento",
+            "• Envie documentos para processamento\n\n"
+            "*O que posso executar:*\n"
+            "• `Pesquise preço do bitcoin` → busca real na web\n"
+            "• `Crie uma planilha de vendas` → gera XLSX real\n"
+            "• `Execute: print('hello')` → roda Python real\n"
+            "• `SELECT * FROM users` → executa SQL real",
             parse_mode=ParseMode.MARKDOWN,
         )
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = await self._ensure_user(update)
+        engine = self._engine.engine_type
+        session_id = self._get_session_id(user.telegram_id)
 
-        async with await get_session() as session:
-            from sqlalchemy import select
-            stmt = (
-                select(Task)
-                .where(Task.user_id == user.id)
-                .where(Task.status.in_([TaskStatus.PENDING, TaskStatus.PROCESSING, TaskStatus.PAUSED]))
-                .order_by(Task.created_at.desc())
-                .limit(10)
+        lines = [f"📊 *Status do SimpleClaw*\n"]
+        lines.append(f"Engine: `{engine}`")
+
+        # Session info (agent loop)
+        if self._engine.session_store:
+            count = self._engine.session_store.get_message_count(
+                str(user.id), session_id
             )
-            result = await session.execute(stmt)
-            tasks = result.scalars().all()
+            lines.append(f"Mensagens na sessão: {count}")
 
-        tasks_data = [
-            {
-                "title": t.title,
-                "status": t.status,
-                "started_at": t.started_at.strftime("%d/%m %H:%M") if t.started_at else None,
-            }
-            for t in tasks
-        ]
-        response = await self._router.format_status_response(tasks_data, str(user.id))
-        await self._safe_reply(update.message, response)
+        # Tools info
+        try:
+            from src.core.tool_registry import build_default_registry
+            registry = build_default_registry()
+            tools = registry.get_tool_names()
+            lines.append(f"Tools ativas: {len(tools)}")
+            lines.append(f"Tools: `{', '.join(tools)}`")
+        except Exception:
+            pass
+
+        # Active tasks from DB
+        try:
+            async with await get_session() as session:
+                from sqlalchemy import select
+                stmt = (
+                    select(Task)
+                    .where(Task.user_id == user.id)
+                    .where(Task.status.in_([TaskStatus.PENDING, TaskStatus.PROCESSING, TaskStatus.PAUSED]))
+                    .order_by(Task.created_at.desc())
+                    .limit(5)
+                )
+                result = await session.execute(stmt)
+                tasks = result.scalars().all()
+
+            if tasks:
+                lines.append(f"\n*Tarefas ativas:*")
+                for t in tasks:
+                    status_emoji = {"pending": "🟡", "processing": "🔵", "paused": "⏸️"}.get(t.status.value, "⚪")
+                    lines.append(f"  {status_emoji} {t.title or 'Sem título'}")
+        except Exception:
+            pass
+
+        await self._safe_reply(update.message, "\n".join(lines))
 
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = await self._ensure_user(update)
@@ -247,6 +267,13 @@ class TelegramBot:
         await self._safe_reply(update.message, "\n".join(lines))
 
     async def _cmd_new_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = await self._ensure_user(update)
+        session_id = self._get_session_id(user.telegram_id)
+
+        # Clear agent loop session if available
+        if self._engine.session_store:
+            self._engine.session_store.clear(str(user.id), session_id)
+
         await update.message.reply_text(
             "🔄 Nova sessão iniciada. Contexto anterior mantido na memória."
         )
@@ -257,13 +284,65 @@ class TelegramBot:
             await update.message.reply_text("⛔ Comando disponível apenas para administradores.")
             return
 
+        lines = ["🏥 *Health Check*\n"]
+        lines.append(f"✅ Engine: `{self._engine.engine_type}`")
+
+        # SearXNG
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{self._settings.searxng_url}/healthz")
+                lines.append("✅ SearXNG: online")
+        except Exception:
+            lines.append("❌ SearXNG: offline")
+
+        # PostgreSQL
+        try:
+            async with await get_session() as session:
+                from sqlalchemy import text
+                await session.execute(text("SELECT 1"))
+                lines.append("✅ PostgreSQL: online")
+        except Exception:
+            lines.append("❌ PostgreSQL: offline")
+
+        # Watchdog
         if self._watchdog:
             await self._watchdog.check_all()
             report = self._watchdog.get_status_report()
+            lines.append(f"\n{report}")
         else:
-            report = "⚠️ Watchdog não inicializado."
+            lines.append("⚠️ Watchdog: inativo")
 
-        await self._safe_reply(update.message, report)
+        await self._safe_reply(update.message, "\n".join(lines))
+
+    async def _cmd_debug(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show debug information."""
+        user = await self._ensure_user(update)
+        if not user.is_admin:
+            await update.message.reply_text("⛔ Comando disponível apenas para administradores.")
+            return
+
+        settings = self._settings
+        lines = [
+            "🔧 *Debug Info*\n",
+            f"Engine: `{self._engine.engine_type}`",
+            f"Provider: `{settings.router_provider.value}`",
+            f"Model: `{settings.router_model_id}`",
+            f"API Base: `{settings.router_api_base or 'not set'}`",
+            f"Temperature: `{settings.router_temperature}`",
+            f"Max Tokens: `{settings.router_max_tokens}`",
+        ]
+
+        # Tool list
+        try:
+            from src.core.tool_registry import build_default_registry
+            registry = build_default_registry()
+            names = registry.get_tool_names()
+            lines.append(f"\nTools ({len(names)}): `{', '.join(names)}`")
+        except Exception:
+            pass
+
+        await self._safe_reply(update.message, "\n".join(lines))
 
     async def _notify_admin(self, telegram_id: int, message: str) -> None:
         if self._app:
@@ -293,6 +372,7 @@ class TelegramBot:
     # ─── MESSAGE HANDLERS ────────────────────────────────────
 
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle incoming text messages via Engine Adapter."""
         user = await self._ensure_user(update)
         message = update.message.text
         session_id = self._get_session_id(user.telegram_id)
@@ -302,49 +382,15 @@ class TelegramBot:
         await update.message.chat.send_action(ChatAction.TYPING)
 
         try:
-            intent = await self._router.classify_intent(message)
-            logger.info("message.classified", intent=intent.value, user_id=user_id)
+            response = await self._engine.chat(
+                message=message,
+                user_id=user_id,
+                session_id=session_id,
+                chat_id=chat_id,
+            )
 
-            if intent == Intent.CHAT:
-                response = await self._router.chat(message, user_id, session_id)
-                await self._safe_reply(update.message, response)
-
-            elif intent == Intent.TASK:
-                result = await self._task_executor.execute(
-                    request=message, user_id=user_id,
-                    session_id=session_id, chat_id=chat_id,
-                )
-                await self._safe_reply(update.message, result)
-                await self._send_generated_files(chat_id, result)
-
-            elif intent == Intent.STATUS:
-                await self._cmd_status(update, context)
-
-            elif intent == Intent.SCHEDULE:
-                # Validate against capabilities before routing
-                try:
-                    from src.sanity.sanity_layer import validate_intent_against_capabilities
-                    decision = validate_intent_against_capabilities("schedule", message)
-                    if decision.action == "impossible":
-                        await self._safe_reply(update.message, f"{decision.reason}")
-                        return
-                except ImportError:
-                    pass
-
-                response = await self._router.chat(
-                    f"O usuário quer agendar algo: {message}", user_id, session_id
-                )
-                await self._safe_reply(update.message, response)
-
-            elif intent == Intent.SEARCH:
-                response = await self._router.chat(
-                    f"Pesquise e responda: {message}", user_id, session_id
-                )
-                await self._safe_reply(update.message, response)
-
-            else:
-                response = await self._router.chat(message, user_id, session_id)
-                await self._safe_reply(update.message, response)
+            await self._safe_reply(update.message, response)
+            await self._send_generated_files(chat_id, response)
 
         except Exception as e:
             logger.error("handle_text.error", error=str(e), user_id=user_id)
@@ -392,9 +438,15 @@ class TelegramBot:
             # Show transcription
             await update.message.reply_text(f"🎤 _{transcribed_text}_", parse_mode=ParseMode.MARKDOWN)
 
-            # Process as normal text
-            response = await self._router.chat(transcribed_text, user_id, session_id)
+            # Process via engine adapter
+            response = await self._engine.chat(
+                message=transcribed_text,
+                user_id=user_id,
+                session_id=session_id,
+                chat_id=update.effective_chat.id,
+            )
             await self._safe_reply(update.message, response)
+            await self._send_generated_files(update.effective_chat.id, response)
 
             # Try TTS response
             try:
@@ -440,8 +492,11 @@ class TelegramBot:
         caption = update.message.caption or "Analise esta imagem."
         session_id = self._get_session_id(user.telegram_id)
 
-        response = await self._router.chat(
-            f"[Imagem recebida] {caption}", str(user.id), session_id,
+        response = await self._engine.chat(
+            message=f"[Imagem recebida] {caption}",
+            user_id=str(user.id),
+            session_id=session_id,
+            chat_id=update.effective_chat.id,
         )
         await self._safe_reply(update.message, response)
 
@@ -460,14 +515,18 @@ class TelegramBot:
         caption = update.message.caption or f"Processar documento: {doc.file_name}"
         session_id = self._get_session_id(user.telegram_id)
 
-        response = await self._router.chat(
-            f"[Documento: {doc.file_name}] {caption}", str(user.id), session_id,
+        response = await self._engine.chat(
+            message=f"[Documento: {doc.file_name}, salvo em {doc_path}] {caption}",
+            user_id=str(user.id),
+            session_id=session_id,
+            chat_id=update.effective_chat.id,
         )
         await self._safe_reply(update.message, response)
+        await self._send_generated_files(update.effective_chat.id, response)
 
     async def _send_generated_files(self, chat_id: int, result_text: str) -> None:
-        import re
-        file_patterns = re.findall(r'/tmp/simpleclaw_files/[^\s\n]+', result_text)
+        """Detect file paths in agent output and send them via Telegram."""
+        file_patterns = re.findall(r'/tmp/simpleclaw[_\w]*/[^\s\n]+', result_text)
         for filepath_str in file_patterns:
             filepath = Path(filepath_str)
             if filepath.exists() and filepath.is_file():
